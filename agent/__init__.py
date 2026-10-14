@@ -7,8 +7,8 @@ classes (CONTRACTS.md section 6.1) each one can save you from.
                      (CONTRACTS.md section 4, exactly)
     strategy.py      discovery / delegation / caching / replica / budget
                      policy — building blocks, not wired in by default
-    guardrails.py    grounding (real), injection/redaction/arithmetic
-                     (named stubs), abstention (real, naive)
+    guardrails.py    grounding, injection, redaction, arithmetic and
+                     answer preparation using current-round observations
     telemetry.py     ctx.emit wrappers — your own side only, never scored
     prompt.md        the system prompt LAYERED ON TOP of kit.loop.prompt's
                      harness prompt (not a replacement for it)
@@ -38,6 +38,7 @@ from agent.guardrails import (
     redact,
     scan_for_injected_instructions,
     verify_arithmetic,
+    prepare_answer,
 )
 from agent.strategy import (
     BudgetPacer,
@@ -50,6 +51,7 @@ from agent.strategy import (
     pick_replica,
     should_delegate,
     successor_of,
+    round_allowance,
 )
 from agent.telemetry import RecordingGatewayContext, Telemetry
 
@@ -69,6 +71,7 @@ __all__ = [
     "ArithmeticCheckResult",
     "verify_arithmetic",
     "abstention_policy",
+    "prepare_answer",
     # strategy.py
     "BudgetPacer",
     "ReplicaChoice",
@@ -80,6 +83,7 @@ __all__ = [
     "pick_replica",
     "should_delegate",
     "successor_of",
+    "round_allowance",
     # telemetry.py
     "RecordingGatewayContext",
     "Telemetry",
@@ -109,6 +113,6 @@ if __name__ == "__main__":
     )
     decision = gw.decide(cmd)
     print(f"  gw.decide(cmd) -> verdict={decision.verdict!r}")
-    assert decision.verdict == "forward"
+    assert decision.verdict in ("forward", "rewrite")
 
     print("\nagent/__init__.py import-and-export check passed.")

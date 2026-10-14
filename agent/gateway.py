@@ -58,18 +58,14 @@ credit penalty PLUS an `integrity` event that hands the prosecutor a free
 agent/README.md's own table. Getting this file to just plainly return valid
 `Decision` values, every time, is worth more than getting it clever.
 
-THE STARTER'S SHAPE (read this before you start editing `decide()`)
+THE IMPLEMENTED POLICY
 ----------------------------------------------------------------------------
-This starter FORWARDS ALMOST EVERYTHING AND DENIES NOTHING. That is not a
-placeholder oversight — it is the honest zero-defence baseline you are
-meant to beat: `bots/rookie` in the kit's own ladder does exactly the same
-thing, and RULES.md's own words are "if you cannot beat Rookie you have a
-bug, not a strategy." `decide()` below is structured as four named jobs —
-ROUTE, ADMIT, AUTHORIZE, BUDGET — each with a one-line TODO naming what a
-real implementation checks and why. None of the four currently rejects,
-rewrites, or reroutes anything; they are seams, not solutions. Fill them in
-using `agent/strategy.py` (routing/budget policy) and `agent/guardrails.py`
-(the safety checks) — both already import cleanly from here.
+`agent.policy.Policy` supplies ROUTE, ADMIT, AUTHORIZE and BUDGET. It checks
+signed delegation, declared skills, the authenticated learner, fresh write
+provenance, leases, replay and credit reserves. `note_result` accepts tool
+observations from the trusted caller; `prepare_answer` checks the final
+answer against observations received during this round. The arena still
+executes and records every decision itself.
 
 ONE THING WORTH INTERNALISING BEFORE YOU WRITE YOUR FIRST REAL CHECK:
 `verdict="deny"` costs the CALLER (your own team) **zero credits** —
@@ -315,254 +311,63 @@ class GatewayContext(Protocol):
 
 
 class Gateway:
-    """The control plane. One instance per duel (CONTRACTS.md 4.3) — built
-    once at duel start with a `GatewayContext`, then asked to `decide()` on
-    every MCP/A2A/DISCOVER command either side of the duel makes for all 10
-    rounds. See the module docstring for the trusted-envelope diagram and
-    why there is no `execute()` to call instead.
-
-    Instance attributes below are this starter's ENTIRE per-duel memory —
-    all currently unused by `decide()`'s naive body, but declared here
-    (rather than invented ad hoc later) so the four TODO jobs below have
-    somewhere obvious to keep state once you implement them. `agent/
-    strategy.py` has working building blocks for exactly this (a budget
-    pacer, a result cache, a replica-choice heuristic) — this starter does
-    not wire them in for you; that wiring is the assignment.
-    """
-
+    """Authoritative synchronous control plane, one instance per duel."""
     def __init__(self, ctx: GatewayContext) -> None:
+        from agent.policy import Policy
         self.ctx = ctx
+        self._policy = Policy(ctx)
         self._telemetry = Telemetry(ctx)
 
-        # --- per-duel memory, unused by the naive starter below ---------
-        # A cache of anchor -> body-ish data you have already paid for this
-        # duel (agent/strategy.py's ResultCache is a ready-made version of
-        # this). Populating it needs the *result* of a call, which decide()
-        # never sees (it only sees the outgoing Command) — you would fill
-        # this from whatever the arena hands back to your agent loop AFTER
-        # a call executes, then consult it here on the NEXT decide() call
-        # for the same anchor.
-        self._seen_anchors: dict[str, Any] = {}
-        # Credits you have personally authorised so far this duel — your
-        # own running total, independent of (and a cross-check against)
-        # `ctx.credits`, which the arena maintains authoritatively.
-        self._credits_authorised: int = 0
-        # Command ids you have already denied, in case a later job wants to
-        # know "have I already said no to this once".
-        self._denied_cmd_ids: set[str] = set()
-
     def decide(self, cmd: Command) -> Decision:
-        """SYNCHRONOUS. PURE. NO I/O. 250 ms wall (RULES.md section 3).
-        Raising anything, or returning a `Decision` `__post_init__` rejects,
-        is treated by the arena exactly like an explicit deny PLUS a 2
-        credit penalty PLUS a scored `integrity` event (CONTRACTS.md 4.1's
-        charging table) — so the one thing this method must never do is
-        blow up or wander off into I/O, no matter how tempting a "quick
-        check" against something external looks. Everything you need to
-        decide is already sitting in `cmd` and `self.ctx`.
-
-        This starter forwards EVERYTHING it is handed, unmodified, and
-        denies NOTHING — see the module docstring's "THE STARTER'S SHAPE".
-        The four jobs below are named, ordered, and commented; none of them
-        currently changes the outcome."""
-        self._telemetry.decision_seen(cmd)
-
-        # ------------------------------------------------------------------
-        # JOB 1 — ROUTE: is this the right SERVER/REPLICA for this command?
-        # TODO(you): day18-style drift is real and measured (CORPUS-FACTS.md
-        # section 2) — a `swap_replica` mutation (CONTRACTS.md section 8's
-        # closed mutation-op set) can point `cmd` at a stale replica without
-        # the model ever noticing. `agent/strategy.py`'s replica-choice
-        # helper is where this heuristic belongs; wire its answer in here by
-        # REWRITING `cmd.headers["mcp-replica"]` (verdict="rewrite") rather
-        # than silently trusting whatever the model asked for.
-        routed = cmd  # starter: no rerouting — pass the command through untouched
-
-        # ------------------------------------------------------------------
-        # JOB 2 — ADMIT: is this call worth letting through AT ALL, before
-        # it costs anything?
-        # TODO(you): a call you already KNOW is doomed (no live lease in
-        # `self.ctx.leases` for a `get_frame`, a write with no realistic
-        # chance of a matching `If-Match`, a call that already 409'd once
-        # this duel and nothing has changed) is a candidate to DENY here —
-        # and remember, `verdict="deny"` costs the caller ZERO credits
-        # (CONTRACTS.md 4.1's charging table has exactly one $0 row, and
-        # this is it). A `deny` you can defend beats a `forward` you can't.
-        # starter: admits every command unconditionally.
-
-        # ------------------------------------------------------------------
-        # JOB 3 — AUTHORIZE: does `routed` actually belong to WHOM YOU SERVE?
-        # TODO(you): a write whose target learner id != `self.ctx.act`, or a
-        # scope this call needs that `self.ctx.scopes` never granted, is the
-        # `authority_exceeded` class (CONTRACTS.md section 6.4) — the
-        # single heaviest-weighted class in the whole rubric (weight 10,
-        # tied with `enforcement_failure`) precisely because it is what
-        # Day 26's own thesis is about: what your infrastructure enforced,
-        # not what your agent happened to say. `kit/mcp/a2a.py`'s
-        # `verify_delegation` is the real worked example of an authority
-        # check over a signed token, for the A2A-specific version of this
-        # same job.
-        # starter: never checks `self.ctx.act` / `self.ctx.scopes` at all —
-        # this is a real hole, left open on purpose for you to close.
-
-        # ------------------------------------------------------------------
-        # JOB 4 — BUDGET: can the DUEL (all 10 rounds, not just this call)
-        # actually afford `routed` as written?
-        # TODO(you): `fields=("*",)` on `registry.list_servers` or
-        # `glossary.list_terms` is a "punishment button" (FINAL-PLAN.md
-        # section 4.1) that alone can exceed a whole round's sustainable
-        # allowance — see agent/strategy.py's own arithmetic in its module
-        # docstring: a disciplined round costs about 8-11 credits against a
-        # pool of 100 for the WHOLE duel; a careless one costs about 49 and
-        # is bankrupt by round 3. When `self.ctx.credits` is getting thin,
-        # REWRITE `routed.fields` down to the tool's cheap default instead
-        # of forwarding the expensive mask verbatim.
-        # starter: never rewrites a mask and never paces spend — it trusts
-        # the model's own field mask exactly as written, every time.
-
-        call = self._to_tool_call(routed)
-        decision = Decision(verdict="forward", call=call)
-        self._telemetry.decision_made(cmd, decision)
+        # Telemetry is not an enforcement dependency.
+        try:
+            self._telemetry.decision_seen(cmd)
+        except Exception:
+            pass
+        try:
+            call, reason = self._policy.evaluate(cmd)
+            if reason:
+                decision = Decision(verdict="deny", reason=reason)
+            else:
+                changed = any((call.server != cmd.server, call.tool != cmd.tool,
+                               call.args != cmd.args, call.fields != cmd.fields,
+                               call.headers != cmd.headers, call.lease_id != cmd.lease_id))
+                decision = Decision(verdict="rewrite" if changed else "forward", call=call)
+        except Exception as exc:
+            decision = Decision(verdict="deny", reason=f"policy could not validate command ({type(exc).__name__})")
+        try:
+            self._telemetry.decision_made(cmd, decision)
+        except Exception:
+            pass
         return decision
 
     def deny(self, cmd: Command, reason: str) -> Decision:
-        """Not called anywhere in this starter's `decide()` — a ready-made
-        helper for when you fill in JOB 2 / JOB 3 above, so denying doesn't
-        mean hand-building a `Decision` inline at every call site. Kept as
-        a real method (not a stub) because the shape of a correct denial —
-        no `call`, a non-empty `reason` — is exactly the thing worth
-        getting right by construction rather than by convention."""
-        self._denied_cmd_ids.add(cmd.cmd_id)
-        decision = Decision(verdict="deny", reason=reason)
-        self._telemetry.decision_made(cmd, decision)
-        return decision
+        return Decision(verdict="deny", reason=reason)
 
-    def _to_tool_call(self, cmd: Command) -> "ToolCall":
-        """`Command` -> the `ToolCall` (CONTRACTS.md 3.1) the arena will
-        actually execute on a `forward`/`rewrite` verdict. When
-        `kit.mcp.types` is unavailable (see the module-level import guard),
-        falls back to a plain dict carrying the identical fields — `Decision`
-        accepts it either way (the `ToolCall` isinstance check inside
-        `Decision.__post_init__` only runs when the real class loaded)."""
-        fields = {
-            "server": cmd.server,
-            "tool": cmd.tool,
-            "args": dict(cmd.args),
-            "fields": cmd.fields,
-            "headers": dict(cmd.headers),
-            "lease_id": cmd.lease_id,
-            "call_index": cmd.call_index,
-        }
-        if _TOOLCALL_AVAILABLE:
-            return ToolCall(**fields)
-        return fields  # type: ignore[return-value]
+    def note_card(self, server: str, card: dict) -> None:
+        self._policy.note_card(server, card)
+
+    def note_provenance(self, anchor: str, etag: str, **kwargs) -> None:
+        self._policy.note_provenance(anchor, etag, **kwargs)
+
+    def note_drift(self, path_id: str, **kwargs) -> None:
+        self._policy.note_drift(path_id, **kwargs)
+
+    def note_result(self, call: ToolCall, result) -> None:
+        self._policy.note_result(call, result)
+
+    def prepare_answer(self, answer: Mapping[str, Any], ask: Mapping[str, Any]) -> dict:
+        from agent.guardrails import prepare_answer
+        self._policy.begin_round()
+        return prepare_answer(answer, self._policy.observations, ask)
 
 
 if __name__ == "__main__":
-    print("=== agent.gateway: Command / Decision validation ===\n")
-
-    good_cmd = Command(
-        cmd_id="cmd:0000",
-        kind="mcp",
-        raw="MCP slides.get_frame anchor=Frame:3f2a9c11/w/041 fields=title,body lease=lse_7f21",
-        server="slides",
-        tool="get_frame",
-        args={"anchor": "Frame:3f2a9c11/w/041"},
-        fields=("body", "title"),
-        headers={},
-        lease_id="lse_7f21",
-        call_index=0,
-    )
-    print(f"  Command constructed: {good_cmd}")
-    assert good_cmd.kind == "mcp"
-
-    print("\n  Rejection demo (each must raise ValueError):")
-
-    def _expect_value_error(label: str, fn) -> None:
-        try:
-            fn()
-        except ValueError as exc:
-            print(f"    [{label:38}] -> ValueError: {exc}")
-        else:
-            raise AssertionError(f"expected ValueError for case {label!r}")
-
-    _expect_value_error("Command.kind == 'answer'", lambda: Command(
-        cmd_id="cmd:0001", kind="answer", raw="x", server="slides", tool="get_frame",
-        args={}, fields=(), headers={}, lease_id=None, call_index=0,
-    ))
-    _expect_value_error("Decision verdict='deny' with no reason", lambda: Decision(verdict="deny"))
-    _expect_value_error(
-        "Decision verdict='forward' with no call", lambda: Decision(verdict="forward")
-    )
-    _expect_value_error(
-        "Decision verdict='deny' carrying a call",
-        lambda: Decision(verdict="deny", reason="nope", call={"server": "x", "tool": "y"}),
-    )
-    _expect_value_error("Decision verdict='?' unknown", lambda: Decision(verdict="???"))
-
-    print("\n=== Command.from_action_dict — real canonicaliser integration ===\n")
-    if _canonicalise_action is None:
-        print("  kit.loop.agent not importable yet — skipping the live canonicaliser demo")
-        demo_commands: list[Command] = [good_cmd]
-    else:
-        raw_actions = [
-            "MCP registry.provenance anchor=Frame:3f2a9c11/w/041 fields=etag",
-            'MCP slides.query q="streamable http replaces http+sse" fields=title,body',
-            "A2A curriculum-analyst.which_days_cover concept=Concept:streamable-http fields=anchor,course_day,track",
-            "DISCOVER registry.list_servers fields=name",
-        ]
-        demo_commands = []
-        for i, raw in enumerate(raw_actions):
-            action = _canonicalise_action(raw, call_index=i)
-            cmd = Command.from_action_dict(action, cmd_id=f"cmd:{i:04d}")
-            print(f"  {raw!r}\n    -> {cmd.kind}: {cmd.server}.{cmd.tool} fields={cmd.fields}")
-            demo_commands.append(cmd)
-        assert {c.kind for c in demo_commands} == {"mcp", "a2a", "discover"}
-
-        answer_action = _canonicalise_action(
-            'ANSWER {"text": "day 26, track P2T2"}', call_index=None
-        )
-        try:
-            Command.from_action_dict(answer_action, cmd_id="cmd:9999")
-        except ValueError as exc:
-            print(f"\n  an 'answer' action correctly refuses to become a Command: {exc}")
-        else:
-            raise AssertionError("expected ValueError for an 'answer' action")
-
-    print("\n=== Gateway.decide — the naive starter forwards everything ===\n")
-    ctx = RecordingGatewayContext(
-        act="learner:sv-0401",
-        sub="agent:demo-team",
-        scopes=frozenset({"wiki.read"}),
-        credits=100,
-        round=1,
-        call_index=0,
-        leases=(),
-        history=(),
-    )
-    assert isinstance(ctx, GatewayContext), "RecordingGatewayContext must structurally satisfy GatewayContext"
-    gw = Gateway(ctx)
-    for cmd in demo_commands:
-        decision = gw.decide(cmd)
-        print(f"  decide({cmd.server}.{cmd.tool}) -> verdict={decision.verdict!r} quarantine={decision.quarantine}")
-        assert decision.verdict == "forward"
-        assert decision.call is not None
-        call_dict = decision.call.to_dict() if hasattr(decision.call, "to_dict") else decision.call
-        assert call_dict["server"] == cmd.server
-        assert call_dict["tool"] == cmd.tool
-        assert tuple(call_dict["fields"]) == cmd.fields
-
-    print(f"\n=== Gateway.deny — the unused-by-default free-abstention path ===\n")
-    denial = gw.deny(demo_commands[0], reason="demo: withholding pending a fresher registry.provenance read")
-    print(f"  gw.deny(...) -> verdict={denial.verdict!r} reason={denial.reason!r} call={denial.call!r}")
-    assert denial.verdict == "deny"
-    assert denial.call is None
-    assert demo_commands[0].cmd_id in gw._denied_cmd_ids
-
-    print(f"\n=== own_telemetry — recorded on YOUR side only, never shown to the opponent ===\n")
-    print(f"  {len(ctx.events)} events recorded on this ctx this run:")
-    for ev in ctx.events:
-        print(f"    {ev['name']}: {sorted(ev['payload'].keys())}")
-    assert len(ctx.events) >= len(demo_commands) * 2 + 1  # decision_seen + decision_made per call, plus the deny
-
-    print("\nAll agent/gateway.py demos passed.")
+    ctx = RecordingGatewayContext(act="learner:sv-0417", sub="agent:vlearn-tutor",
+                                  scopes=frozenset({"wiki.read"}), credits=100,
+                                  round=1, call_index=0)
+    gateway = Gateway(ctx)
+    command = Command(cmd_id="cmd:demo", kind="mcp", raw="slides.query",
+                      server="slides", tool="query", args={"q": "MCP"},
+                      fields=("title",), headers={}, lease_id=None, call_index=0)
+    print(gateway.decide(command).to_dict())
